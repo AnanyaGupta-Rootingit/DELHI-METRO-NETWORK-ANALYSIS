@@ -3,456 +3,215 @@ import pandas as pd
 import geopandas as gpd
 import folium
 from folium.plugins import HeatMap
-from streamlit_folium import st_folium
 import matplotlib.pyplot as plt
 import plotly.express as px
 import plotly.graph_objects as go
 import plotly.figure_factory as ff
 import plotly.colors as pc
 import re
-from geopy.distance import geodesic
 import numpy as np
+from shapely.geometry import Point
+from geopy.distance import geodesic
 import statsmodels.api as sm
 import seaborn as sns
-import io
-
-# Set page configuration
-st.set_page_config(layout="wide", page_title="Delhi Metro Analysis Dashboard")
-
-st.title("Delhi Metro Network Analysis")
-
-# --- File Upload ---
-st.sidebar.header("Upload Data")
-uploaded_file = st.sidebar.file_uploader("Upload Delhi_Metro_Master.xlsx", type="xlsx")
-
-if uploaded_file is not None:
-    try:
-        # Load data from the uploaded Excel file
-        stations_df = pd.read_excel(uploaded_file, sheet_name='Stations')
-        wards_df = pd.read_excel(uploaded_file, sheet_name='Ward_Population')
-        ridership_df = pd.read_excel(uploaded_file, sheet_name='Ridership_RS')
-        ridership_long_df = pd.read_excel(uploaded_file, sheet_name='Ridership_Long')
-
-        st.sidebar.success("Data loaded successfully!")
-
-        # --- Data Cleaning (Replicate cleaning from notebook) ---
-
-        # Clean 'Annual Ridership': remove commas and any non-digit characters
-        def clean_ridership(value):
-            if pd.isnull(value):
-                return 0
-            clean_value = re.sub(r'[^\d]', '', str(value))
-            return int(clean_value) if clean_value else 0
-
-        ridership_long_df['Annual Ridership'] = ridership_long_df['Annual Ridership'].apply(clean_ridership)
-
-        # Clean 'Route Length (km)'
-        ridership_long_df['Route Length (km)'] = pd.to_numeric(ridership_long_df['Route Length (km)'], errors='coerce')
-
-        # Parse 'Opening Date'
-        stations_df['Opening Date'] = pd.to_datetime(stations_df['Opening Date'], errors='coerce')
-
-        # Clean 'Distance from Start (km)'
-        stations_df['Distance from Start (km)'] = pd.to_numeric(stations_df['Distance from Start (km)'], errors='coerce')
-
-        # Strip extra spaces from 'Line'
-        stations_df['Line'] = stations_df['Line'].str.strip()
-        ridership_long_df['Year'] = ridership_long_df['Year'].astype(str).str.strip()
-
-        # Strip spaces from 'Station Layout' and 'Station' and 'Ward'
-        stations_df['Station Layout'] = stations_df['Station Layout'].str.strip()
-        stations_df['Station'] = stations_df['Station'].str.strip()
-        wards_df['Ward'] = wards_df['Ward'].str.strip()
-
-        # Drop rows with missing network coordinates for stations for mapping/geospatial analysis
-        stations_gdf_cleaned = stations_df.dropna(subset=['Latitude_network', 'Longitude_network']).copy()
-
-        # Add Latitude and Longitude columns to wards_df if they don't exist (using random for demo)
-        if 'Latitude' not in wards_df.columns or 'Longitude' not in wards_df.columns:
-            # Generate random points around Delhi's center for demo purposes (replace with actual data if available)
-            np.random.seed(0) # Use a seed for reproducibility of random points
-            wards_df['Latitude'] = 28.6139 + np.random.uniform(-0.1, 0.1, size=len(wards_df))
-            wards_df['Longitude'] = 77.2090 + np.random.uniform(-0.1, 0.1, size=len(wards_df))
-
-        # Drop rows with missing Latitude, Longitude, or Population for wards
-        wards_df_cleaned = wards_df.dropna(subset=['Latitude', 'Longitude', 'Population']).copy()
-
-
-        # --- Navigation Sidebar ---
-        st.sidebar.header("Analysis Sections")
-        section = st.sidebar.radio("Go to", [
-            "Network Overview",
-            "Station Characteristics",
-            "Ridership Analysis",
-            "Population Coverage",
-            "Regression Analysis",
-            "Project Summary"
-        ])
-
-        # --- Display Sections ---
-
-        if section == "Network Overview":
-            st.header("Metro Network Overview")
-
-            # Base Map
-            st.subheader("Delhi Metro Map")
-            m = folium.Map(location=[28.6139, 77.2090], zoom_start=11)
-
-            # Add stations as markers
-            line_colors = {
-                'Red': 'red', 'Blue': 'blue', 'Yellow': 'orange', 'Green': 'green',
-                'Violet': 'purple', 'Magenta': 'pink', 'Grey': 'gray', 'Pink': 'lightpink',
-                'Rapid Metro': 'cadetblue', 'Aqua': 'cyan', 'Orange': 'darkorange' # Added more colors
-            }
-
-            for idx, row in stations_gdf_cleaned.iterrows():
-                folium.CircleMarker(
-                    location=[row['Latitude_network'], row['Longitude_network']],
-                    radius=5,
-                    color=line_colors.get(row['Line'], 'black'),
-                    fill=True,
-                    fill_opacity=0.7,
-                    popup=f"{row['Station']} ({row['Line']})"
-                ).add_to(m)
-
-            # Add HeatMap layer
-            heat_data = stations_gdf_cleaned[['Latitude_network', 'Longitude_network']].values.tolist()
-            HeatMap(heat_data, radius=15, blur=10, max_zoom=13).add_to(m)
-
-            st_folium(m, width=700, height=500)
-
-            st.subheader("Interactive Station and Buffer Map")
-
-            # Interactive controls
-            unique_lines = stations_df['Line'].unique().tolist()
-            selected_lines = st.multiselect("Select Lines:", unique_lines, default=unique_lines)
-
-            unique_layouts = stations_df['Station Layout'].dropna().unique().tolist()
-            selected_layouts = st.multiselect("Select Layouts:", unique_layouts, default=unique_layouts)
-
-            buffer_distance = st.radio("Select Buffer Distance (meters):", [500, 1000])
-
-            # Filter stations based on selection
-            filtered_stations = stations_df[
-                (stations_df['Line'].isin(selected_lines)) &
-                (stations_df['Station Layout'].isin(selected_layouts))
-            ].dropna(subset=['Latitude_network', 'Longitude_network']).copy()
-
-            if not filtered_stations.empty:
-                # Convert to GeoDataFrame and create buffers
-                gdf_filtered = gpd.GeoDataFrame(
-                    filtered_stations,
-                    geometry=gpd.points_from_xy(filtered_stations['Longitude_network'], filtered_stations['Latitude_network']),
-                    crs="EPSG:4326"
-                ).to_crs(epsg=3857)
-
-                gdf_filtered['buffer'] = gdf_filtered.geometry.buffer(buffer_distance)
-                gdf_filtered = gdf_filtered.to_crs(epsg=4326)
-
-                # Create map
-                buffer_map = folium.Map(location=[28.6139, 77.2090], zoom_start=11)
-
-                # Add buffers
-                for idx, row in gdf_filtered.iterrows():
-                    folium.GeoJson(row['buffer'],
-                                   style_function=lambda x: {'fillColor': 'blue', 'color': 'blue', 'weight': 1, 'fillOpacity': 0.2}
-                                  ).add_to(buffer_map)
-
-                # Add station markers
-                for idx, row in gdf_filtered.iterrows():
-                    folium.CircleMarker(
-                        location=[row.geometry.y, row.geometry.x],
-                        radius=3,
-                        color='black',
-                        fill=True,
-                        fill_opacity=0.7,
-                        popup=f"{row['Station']} ({row['Line']})"
-                    ).add_to(buffer_map)
-
-                st_folium(buffer_map, width=700, height=500)
-            else:
-                st.warning("No stations match the selected criteria.")
-
-
-        elif section == "Station Characteristics":
-            st.header("Station Characteristics")
-
-            st.subheader("Overall Station Layout Distribution")
-            layout_counts = stations_df['Station Layout'].value_counts().reset_index()
-            layout_counts.columns = ['Layout', 'Count']
-            fig_pie, ax_pie = plt.subplots(figsize=(8,6))
-            ax_pie.pie(layout_counts['Count'], labels=layout_counts['Layout'], autopct='%1.1f%%', startangle=140)
-            ax_pie.set_title('Overall Station Layout Distribution')
-            st.pyplot(fig_pie)
-
-            st.subheader("Layout Preference per Line")
-            layout_line = stations_df.groupby(['Line', 'Station Layout']).size().reset_index(name='Count')
-            fig_bar = px.bar(layout_line, x='Line', y='Count', color='Station Layout',
-                             title='Layout Preference per Line',
-                             labels={'Count': 'Number of Stations', 'Station Layout': 'Layout'})
-            fig_bar.update_layout(barmode='stack', xaxis_tickangle=-45)
-            st.plotly_chart(fig_bar)
-
-            st.subheader("Spatial Mapping of Station Layouts")
-            stations_map_df = stations_df.dropna(subset=['Latitude_network', 'Longitude_network']).copy()
-            fig_map = px.scatter_mapbox(stations_map_df, lat='Latitude_network', lon='Longitude_network', color='Station Layout',
-                                        hover_name='Station',
-                                        zoom=10, height=600,
-                                        title='Spatial Mapping of Station Layouts')
-            fig_map.update_layout(mapbox_style='open-street-map')
-            fig_map.update_layout(margin={"r":0,"t":50,"l":0,"b":0})
-            st.plotly_chart(fig_map)
-
-
-        elif section == "Ridership Analysis":
-            st.header("Ridership Analysis")
-
-            st.subheader("Annual Ridership Trends (2018–2022)")
-            fig_ridership_line = px.line(ridership_df, x='Year', y='Ridership (Lakhs/day)', markers=True,
-                                          title='Annual Ridership Trends (2018–2022)',
-                                          labels={'Ridership (Lakhs/day)': 'Ridership', 'Year': 'Year'})
-            fig_ridership_line.update_traces(line=dict(width=3), marker=dict(size=8))
-            st.plotly_chart(fig_ridership_line)
-
-            st.subheader("Ridership Trend with COVID-19 Impact")
-            fig_covid = go.Figure()
-            fig_covid.add_trace(go.Scatter(x=ridership_df['Year'], y=ridership_df['Ridership (Lakhs/day)'],
-                                             mode='lines+markers', name='Ridership'))
-            fig_covid.add_vrect(x0=2020, x1=2021, fillcolor="red", opacity=0.2,
-                                  layer="below", line_width=0,
-                                  annotation_text="COVID-19 Impact", annotation_position="top left")
-            fig_covid.update_layout(title='Ridership Trend with COVID-19 Impact (2018–2022)',
-                                      xaxis_title='Year',
-                                      yaxis_title='Ridership (Lakhs/day)',
-                                      xaxis=dict(tickmode='linear'))
-            st.plotly_chart(fig_covid)
-
-            st.subheader("Ridership Trend with Rolling Average (3-Year)")
-            ridership_df['Rolling_Avg'] = ridership_df['Ridership (Lakhs/day)'].rolling(window=3, center=True).mean()
-            fig_rolling, ax_rolling = plt.subplots(figsize=(10,6))
-            ax_rolling.plot(ridership_df['Year'], ridership_df['Ridership (Lakhs/day)'], marker='o', label='Actual Ridership')
-            ax_rolling.plot(ridership_df['Year'], ridersership_df['Rolling_Avg'], marker='x', linestyle='--', color='orange', label='3-Year Rolling Average')
-            ax_rolling.set_title('Ridership Trend with Rolling Average', fontsize=14)
-            ax_rolling.set_xlabel('Year', fontsize=12)
-            ax_rolling.set_ylabel('Ridership (Lakhs/day)', fontsize=12)
-            ax_rolling.legend()
-            ax_rolling.grid(True)
-            st.pyplot(fig_rolling)
-
-            st.subheader("Year-over-Year Ridership Change (%)")
-            ridership_df['YoY_Change'] = ridership_df['Ridership (Lakhs/day)'].pct_change() * 100
-            fig_yoy, ax_yoy = plt.subplots(figsize=(10,6))
-            ax_yoy.bar(ridership_df['Year'], ridership_df['YoY_Change'], color='purple')
-            ax_yoy.set_title('Year-over-Year Ridership Change (%)', fontsize=14)
-            ax_yoy.set_xlabel('Year', fontsize=12)
-            ax_yoy.set_ylabel('YoY Change (%)', fontsize=12)
-            ax_yoy.grid(axis='y')
-            st.pyplot(fig_yoy)
-
-
-        elif section == "Population Coverage":
-            st.header("Population Coverage and Underserved Areas")
-
-            # Ensure wards_df_cleaned is used for this section
-            if not wards_df_cleaned.empty and not stations_gdf_cleaned.empty:
-
-                # Assign nearest station to each ward
-                def find_nearest_station(ward_coord, stations_df):
-                    min_dist = float('inf')
-                    nearest_station = None
-                    for _, row in stations_df.iterrows():
-                        station_coord = (row['Latitude_network'], row['Longitude_network'])
-                        dist = geodesic(ward_coord, station_coord).km
-                        if dist < min_dist:
-                            min_dist = dist
-                            nearest_station = row['Station']
-                    return nearest_station, min_dist
-
-                # Apply to each ward
-                nearest_stations = []
-                distances = []
-                for _, row in wards_df_cleaned.iterrows():
-                    ward_coord = (row['Latitude'], row['Longitude'])
-                    station_name, distance = find_nearest_station(ward_coord, stations_gdf_cleaned)
-                    nearest_stations.append(station_name)
-                    distances.append(distance)
-
-                wards_df_cleaned['Nearest Station'] = nearest_stations
-                wards_df_cleaned['Distance to Station (km)'] = distances
-
-                st.subheader("Population Served per Station (Estimated)")
-                population_per_station = wards_df_cleaned.groupby('Nearest Station')['Population'].sum().reset_index()
-                population_per_station = population_per_station.sort_values(by='Population', ascending=False)
-                fig_pop_station = px.bar(population_per_station.head(20), x='Nearest Station', y='Population', # Display top 20
-                                         title='Top 20 Stations by Estimated Population Served',
-                                         labels={'Population': 'Population'})
-                fig_pop_station.update_layout(xaxis_tickangle=-45)
-                st.plotly_chart(fig_pop_station)
-
-
-                st.subheader("Population Coverage within Buffer Zones")
-
-                # Convert stations to GeoDataFrame for buffer analysis
-                stations_geo_3857 = gpd.GeoDataFrame(
-                    stations_gdf_cleaned,
-                    geometry=gpd.points_from_xy(stations_gdf_cleaned['Longitude_network'], stations_gdf_cleaned['Latitude_network']),
-                    crs="EPSG:4326"
-                ).to_crs(epsg=3857)
-
-                # Create buffer zones
-                stations_geo_3857['buffer_500m'] = stations_geo_3857.geometry.buffer(500)
-                stations_geo_3857['buffer_1km'] = stations_geo_3857.geometry.buffer(1000)
-
-                # Convert wards to EPSG:3857 for spatial operations
-                wards_geo_3857 = gpd.GeoDataFrame(
-                    wards_df_cleaned,
-                    geometry=gpd.points_from_xy(wards_df_cleaned['Longitude'], wards_df_cleaned['Latitude']),
-                    crs="EPSG:4326"
-                ).to_crs(epsg=3857)
-
-                # Initialize population sums
-                wards_df_cleaned['covered_500m'] = 0
-                wards_df_cleaned['covered_1km'] = 0
-
-                # Perform spatial intersection
-                for idx_w, ward in wards_geo_3857.iterrows():
-                    ward_point = ward.geometry
-                    pop = ward['Population']
-
-                    # Check if the ward intersects any 500m buffer
-                    if stations_geo_3857['buffer_500m'].intersects(ward_point).any():
-                        wards_df_cleaned.loc[idx_w, 'covered_500m'] = pop
-
-                    # Check if the ward intersects any 1km buffer
-                    if stations_geo_3857['buffer_1km'].intersects(ward_point).any():
-                        wards_df_cleaned.loc[idx_w, 'covered_1km'] = pop
-
-                # Sum total population covered
-                total_population = wards_df_cleaned['Population'].sum()
-                covered_500m = wards_df_cleaned['covered_500m'].sum()
-                covered_1km = wards_df_cleaned['covered_1km'].sum()
-                uncovered_500m = total_population - covered_500m
-                uncovered_1km = total_population - covered_1km
-
-                coverage_data = {
-                    '500m': [covered_500m, uncovered_500m],
-                    '1km': [covered_1km, uncovered_1km]
-                }
-
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    st.write("Population Coverage within 500m:")
-                    fig_cov_500, ax_cov_500 = plt.subplots(figsize=(6,5))
-                    ax_cov_500.bar(['Covered', 'Uncovered'], coverage_data['500m'], color=['green', 'red'])
-                    ax_cov_500.set_title('Population Coverage within 500m')
-                    ax_cov_500.set_ylabel('Population')
-                    st.pyplot(fig_cov_500)
-
-                with col2:
-                    st.write("Population Coverage within 1km:")
-                    fig_cov_1km, ax_cov_1km = plt.subplots(figsize=(6,5))
-                    ax_cov_1km.bar(['Covered', 'Uncovered'], coverage_data['1km'], color=['green', 'red'])
-                    ax_cov_1km.set_title('Population Coverage within 1km')
-                    st.pyplot(fig_cov_1km)
-
-                st.subheader("Underserved Areas")
-                underserved_500m = wards_df_cleaned[wards_df_cleaned['covered_500m'] == 0].sort_values(by='Population', ascending=False)
-                underserved_1km = wards_df_cleaned[wards_df_cleaned['covered_1km'] == 0].sort_values(by='Population', ascending=False)
-
-                st.write("Top 5 underserved wards within 500m:")
-                st.dataframe(underserved_500m[['Ward', 'Population', 'Distance to Station (km)']].head())
-
-                st.write("Top 5 underserved wards within 1km:")
-                st.dataframe(underserved_1km[['Ward', 'Population', 'Distance to Station (km)']].head())
-
-                st.subheader("Map of Underserved Wards (within 1km buffer)")
-
-                # Visualize underserved areas on map
-                fig_underserved_map = px.scatter_mapbox(wards_df_cleaned, lat='Latitude', lon='Longitude', size='Population',
-                                                        hover_name='Ward', hover_data=['Distance to Station (km)', 'covered_1km'],
-                                                        color=wards_df_cleaned['covered_1km'] > 0,
-                                                        color_discrete_map={True: 'green', False: 'red'},
-                                                        labels={True: 'Covered (1km)', False: 'Underserved (1km)'},
-                                                        zoom=10, height=600,
-                                                        title='Wards by Metro Coverage within 1km')
-
-                fig_underserved_map.update_layout(mapbox_style='open-street-map')
-                fig_underserved_map.update_layout(margin={"r":0,"t":50,"l":0,"b":0})
-                st.plotly_chart(fig_underserved_map)
-
-            else:
-                st.warning("Ward population or station data is not available to perform this analysis.")
-
-
-        elif section == "Regression Analysis":
-            st.header("Regression Analysis: Ward Population vs. Distance to Nearest Station")
-
-            if 'Distance to Station (km)' in wards_df_cleaned.columns and not wards_df_cleaned.empty:
-                 # Drop rows with missing values in the relevant columns
-                regression_df = wards_df_cleaned.dropna(subset=['Population', 'Distance to Station (km)']).copy()
-
-                if not regression_df.empty:
-                    # Define dependent and independent variables
-                    y = regression_df['Distance to Station (km)']
-                    X = regression_df['Population']
-
-                    # Add a constant
-                    X = sm.add_constant(X)
-
-                    # Create and fit the regression model
-                    model = sm.OLS(y, X).fit()
-
-                    st.subheader("Regression Model Summary")
-                    st.text(model.summary()) # Display summary as text
-
-                    st.subheader("Ward Population vs. Distance to Nearest Station with Regression Line")
-                    fig_reg, ax_reg = plt.subplots(figsize=(10, 6))
-                    sns.scatterplot(data=regression_df, x='Population', y='Distance to Station (km)', alpha=0.6, ax=ax_reg)
-                    ax_reg.set_title('Ward Population vs. Distance to Nearest Station')
-                    ax_reg.set_xlabel('Population')
-                    ax_reg.set_ylabel('Distance to Station (km)')
-                    ax_reg.grid(True)
-
-                    # Add the regression line
-                    y_pred = model.predict(X)
-                    ax_reg.plot(regression_df['Population'], y_pred, color='red', linewidth=2)
-
-                    st.pyplot(fig_reg)
-                else:
-                    st.warning("Not enough data with both population and distance information for regression analysis.")
-            else:
-                st.warning("Nearest station distance data is not available for regression analysis. Please ensure the Population Coverage section was processed.")
-
-
-        elif section == "Project Summary":
-            st.header("Project Summary and Key Findings")
-            st.markdown("""
-            This project explored various aspects of the Delhi Metro network using the provided dataset. The key analyses and findings include:
-
-            1.  **Metro Network Overview:**
-                *   We visualized the spatial distribution of metro stations across Delhi, colored by their respective lines.
-                *   A heatmap was created to show the density of metro stations.
-                *   An interactive map was developed to filter stations by line and layout, and visualize buffer zones (500m and 1km) around selected stations.
-            2.  **Station Characteristics:**
-                *   Analysis of station layouts revealed the distribution of Elevated, Underground, and At-Grade stations both overall and per metro line.
-            3.  **Ridership Analysis:**
-                *   We examined the annual ridership trends from 2018-19 to 2021-22, observing the significant impact of the COVID-19 pandemic on ridership figures.
-                *   Rolling averages and year-over-year percentage changes in ridership were calculated and visualized to better understand the trends and recovery.
-            4.  **Population Coverage and Underserved Areas:**
-                *   By approximating ward locations and calculating the distance to the nearest metro station, we estimated the population covered within 500m and 1km buffer zones.
-                *   We identified and listed the top underserved wards based on their distance from the nearest station.
-                *   A map was generated to visualize wards colored by their coverage status within the 1km buffer.
-            5.  **Regression Analysis:**
-                *   A linear regression analysis was performed to explore the relationship between ward population and the distance to the nearest metro station.
-                *   The analysis indicated a very weak linear relationship, suggesting that based on this model and the approximate ward locations, population size alone is not a strong predictor of a ward's proximity to a metro station.
-
-            Overall, these analyses provide insights into the physical structure, operational performance (ridership trends), and spatial accessibility of the Delhi Metro network in relation to the population distribution of Delhi's wards. Further analysis could benefit from more precise geographical data for wards and more detailed ridership information linked to specific lines or stations.
-            """)
-
-    except Exception as e:
-        st.error(f"An error occurred: {e}")
-        st.error("Please ensure you have uploaded the correct 'Delhi_Metro_Master.xlsx' file and that the sheet names ('Stations', 'Ward_Population', 'Ridership_RS', 'Ridership_Long') are correct.")
-
-else:
-    st.info("Please upload the 'Delhi_Metro_Master.xlsx' file to get started.")
+from streamlit_folium import st_folium
+
+st.set_page_config(layout="wide", page_title="Delhi Metro Analysis")
+
+try:
+    st.header("Upload Dataset")
+    uploaded_file = st.file_uploader("Upload 'Delhi_Metro_Master.xlsx'", type="xlsx")
+    
+    if uploaded_file is not None:
+        file_path = uploaded_file
+        
+        # 📌 Load the datasets
+        stations_df = pd.read_excel(file_path, sheet_name='Stations')
+        wards_df = pd.read_excel(file_path, sheet_name='Ward_Population')
+        ridership_df = pd.read_excel(file_path, sheet_name='Ridership_RS')
+        ridership_long_df = pd.read_excel(file_path, sheet_name='Ridership_Long')
+        
+        # ➤ Display first few rows
+        st.subheader("Stations and Wards Preview")
+        st.write(stations_df.head())
+        st.write(wards_df.head())
+        
+        # ➤ Map with Station Markers
+        st.subheader("Metro Stations Map")
+        delhi_map = folium.Map(location=[28.6139, 77.2090], zoom_start=11)
+        line_colors = {
+            'Red': 'red', 'Blue': 'blue', 'Yellow': 'orange', 'Green': 'green',
+            'Violet': 'purple', 'Magenta': 'pink', 'Grey': 'gray',
+            'Pink': 'lightpink', 'Rapid Metro': 'cadetblue'
+        }
+        stations_df_cleaned = stations_df.dropna(subset=['Latitude_network', 'Longitude_network'])
+        for idx, row in stations_df_cleaned.iterrows():
+            folium.CircleMarker(
+                location=[row['Latitude_network'], row['Longitude_network']],
+                radius=5,
+                color=line_colors.get(row['Line'], 'black'),
+                fill=True,
+                fill_opacity=0.7,
+                popup=f"{row['Station']} ({row['Line']})"
+            ).add_to(delhi_map)
+        st_folium(delhi_map, width=700)
+        
+        # ➤ Heatmap
+        st.subheader("Metro Stations Heatmap")
+        heat_data = stations_df.dropna(subset=['Latitude_network', 'Longitude_network'])[['Latitude_network', 'Longitude_network']].values.tolist()
+        HeatMap(heat_data, radius=15, blur=10, max_zoom=13).add_to(delhi_map)
+        st_folium(delhi_map, width=700)
+        
+        # ➤ Layer Control Map
+        st.subheader("Interactive Map with Layers")
+        stations_fg = folium.FeatureGroup(name='Stations')
+        heatmap_fg = folium.FeatureGroup(name='Heatmap')
+        for idx, row in stations_df_cleaned.iterrows():
+            folium.CircleMarker(
+                location=[row['Latitude_network'], row['Longitude_network']],
+                radius=5,
+                color=line_colors.get(row['Line'], 'black'),
+                fill=True,
+                fill_opacity=0.7,
+                popup=f"{row['Station']} ({row['Line']})"
+            ).add_to(stations_fg)
+        HeatMap(heat_data, radius=15, blur=10, max_zoom=13).add_to(heatmap_fg)
+        stations_fg.add_to(delhi_map)
+        heatmap_fg.add_to(delhi_map)
+        folium.LayerControl().add_to(delhi_map)
+        st_folium(delhi_map, width=700)
+        
+        # ➤ Station Count Plot
+        st.subheader("Number of Stations per Line")
+        station_counts = stations_df.groupby('Line')['Station'].count().reset_index().rename(columns={'Station': 'Station Count'})
+        st.write(station_counts)
+        plt.figure(figsize=(10,6))
+        plt.bar(station_counts['Line'], station_counts['Station Count'], color='skyblue')
+        plt.xticks(rotation=45, ha='right')
+        plt.title('Number of Stations per Metro Line')
+        plt.xlabel('Line')
+        plt.ylabel('Station Count')
+        plt.tight_layout()
+        st.pyplot(plt)
+        fig = px.bar(station_counts, x='Line', y='Station Count', color='Line', title='Number of Stations per Metro Line', labels={'Line': 'Metro Line', 'Station Count': 'Stations'})
+        fig.update_layout(xaxis_tickangle=-45)
+        st.plotly_chart(fig)
+        
+        # ➤ Buffer Zone Map
+        st.subheader("Buffer Zones Around Stations")
+        gdf = gpd.GeoDataFrame(
+            stations_df_cleaned,
+            geometry=gpd.points_from_xy(stations_df_cleaned['Longitude_network'], stations_df_cleaned['Latitude_network']),
+            crs="EPSG:4326"
+        ).to_crs(epsg=3857)
+        gdf['buffer_500m'] = gdf.geometry.buffer(500)
+        gdf['buffer_1km'] = gdf.geometry.buffer(1000)
+        gdf = gdf.to_crs(epsg=4326)
+        buffer_map = folium.Map(location=[28.6139, 77.2090], zoom_start=11)
+        for idx, row in gdf.iterrows():
+            folium.GeoJson(row['buffer_500m'], style_function=lambda x: {'fillColor': 'blue', 'color': 'blue', 'weight': 1, 'fillOpacity': 0.2}).add_to(buffer_map)
+            folium.GeoJson(row['buffer_1km'], style_function=lambda x: {'fillColor': 'red', 'color': 'red', 'weight': 1, 'fillOpacity': 0.1}).add_to(buffer_map)
+            folium.CircleMarker(location=[row.geometry.y, row.geometry.x], radius=3, color='black', fill=True, fill_opacity=0.7, popup=f"{row['Station']} ({row['Line']})").add_to(buffer_map)
+        st_folium(buffer_map, width=700)
+        
+        # ➤ Population Coverage
+        st.subheader("Population Coverage by Buffer Zones")
+        np.random.seed(0)
+        wards_df['Latitude'] = 28.6139 + np.random.uniform(-0.1, 0.1, size=len(wards_df))
+        wards_df['Longitude'] = 77.2090 + np.random.uniform(-0.1, 0.1, size=len(wards_df))
+        wards_gdf = gpd.GeoDataFrame(wards_df, geometry=gpd.points_from_xy(wards_df['Longitude'], wards_df['Latitude']), crs="EPSG:4326").to_crs(epsg=3857)
+        station_buffers = gdf.to_crs(epsg=3857)
+        wards_df['covered_500m'] = 0
+        wards_df['covered_1km'] = 0
+        for idx_w, ward in wards_gdf.iterrows():
+            ward_point = ward.geometry
+            pop = ward['Population']
+            if station_buffers['buffer_500m'].intersects(ward_point).any():
+                wards_df.at[idx_w, 'covered_500m'] = pop
+            if station_buffers['buffer_1km'].intersects(ward_point).any():
+                wards_df.at[idx_w, 'covered_1km'] = pop
+        total_covered_500m = wards_df['covered_500m'].sum()
+        total_covered_1km = wards_df['covered_1km'].sum()
+        st.write(f"Total population covered within 500m: {total_covered_500m}")
+        st.write(f"Total population covered within 1km: {total_covered_1km}")
+        
+        # ➤ Coverage Plot
+        total_population = wards_df['Population'].sum()
+        covered_500m = wards_df['covered_500m'].sum()
+        covered_1km = wards_df['covered_1km'].sum()
+        uncovered_500m = total_population - covered_500m
+        uncovered_1km = total_population - covered_1km
+        fig, ax = plt.subplots(1, 2, figsize=(12, 5))
+        ax[0].bar(['Covered', 'Uncovered'], [covered_500m, uncovered_500m], color=['green', 'red'])
+        ax[0].set_title('Population Coverage within 500m')
+        ax[0].set_ylabel('Population')
+        ax[1].bar(['Covered', 'Uncovered'], [covered_1km, uncovered_1km], color=['green', 'red'])
+        ax[1].set_title('Population Coverage within 1km')
+        plt.tight_layout()
+        st.pyplot(fig)
+        
+        underserved_500m = wards_df[wards_df['covered_500m'] == 0].sort_values(by='Population', ascending=False)
+        underserved_1km = wards_df[wards_df['covered_1km'] == 0].sort_values(by='Population', ascending=False)
+        st.subheader("Top underserved wards within 500m")
+        st.write(underserved_500m[['Ward', 'Population']].head())
+        st.subheader("Top underserved wards within 1km")
+        st.write(underserved_1km[['Ward', 'Population']].head())
+        
+        # ➤ Underserved Map
+        ward_map = folium.Map(location=[28.6139, 77.2090], zoom_start=11)
+        for idx, row in wards_gdf.iterrows():
+            color = 'green' if wards_df.loc[idx, 'covered_1km'] > 0 else 'red'
+            folium.CircleMarker(location=[row.geometry.y, row.geometry.x], radius=7, color=color, fill=True, fill_opacity=0.6, popup=f"{wards_df.loc[idx, 'Ward']} ({wards_df.loc[idx, 'Population']} people)").add_to(ward_map)
+        st_folium(ward_map, width=700)
+        
+        # ➤ Interactive Buffer Map
+        st.subheader("Interactive Map with Filters")
+        unique_lines = stations_df['Line'].unique().tolist()
+        line_selector = st.multiselect("Select Lines", unique_lines, default=unique_lines)
+        unique_layouts = stations_df['Station Layout'].dropna().unique().tolist()
+        layout_selector = st.multiselect("Select Layouts", unique_layouts, default=unique_layouts)
+        buffer_distance = st.radio("Select Buffer Distance", [500, 1000], index=0)
+        
+        # Filter stations
+        filtered_stations = stations_df[(stations_df['Line'].isin(line_selector)) & (stations_df['Station Layout'].isin(layout_selector))].dropna(subset=['Latitude_network', 'Longitude_network'])
+        gdf_filtered = gpd.GeoDataFrame(filtered_stations, geometry=gpd.points_from_xy(filtered_stations['Longitude_network'], filtered_stations['Latitude_network']), crs="EPSG:4326").to_crs(epsg=3857)
+        gdf_filtered['buffer'] = gdf_filtered.geometry.buffer(buffer_distance)
+        gdf_filtered = gdf_filtered.to_crs(epsg=4326)
+        map_filtered = folium.Map(location=[28.6139, 77.2090], zoom_start=11)
+        for idx, row in gdf_filtered.iterrows():
+            folium.GeoJson(row['buffer'], style_function=lambda x: {'fillColor': 'blue', 'color': 'blue', 'weight': 1, 'fillOpacity': 0.2}).add_to(map_filtered)
+            folium.CircleMarker(location=[row.geometry.y, row.geometry.x], radius=5, color='black', fill=True, fill_opacity=0.7, popup=f"{row['Station']} ({row['Line']})").add_to(map_filtered)
+        st_folium(map_filtered, width=700)
+        
+        # ➤ Ridership Trends
+        st.subheader("Annual Ridership Trends")
+        plt.figure(figsize=(10,6))
+        plt.plot(ridership_df['Year'], ridership_df['Ridership (Lakhs/day)'], marker='o', color='blue')
+        plt.title('Annual Ridership Trends (2013–2022)', fontsize=14)
+        plt.xlabel('Year', fontsize=12)
+        plt.ylabel('Ridership (Lakhs/day)', fontsize=12)
+        plt.grid(True)
+        plt.xticks(ridership_df['Year'])
+        plt.tight_layout()
+        st.pyplot(plt)
+        fig = px.line(ridership_df, x='Year', y='Ridership (Lakhs/day)', markers=True, title='Annual Ridership Trends (2013–2022)', labels={'Ridership (Lakhs/day)': 'Ridership', 'Year': 'Year'})
+        fig.update_traces(line=dict(width=3), marker=dict(size=8))
+        st.plotly_chart(fig)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=ridership_df['Year'], y=ridership_df['Ridership (Lakhs/day)'], mode='lines+markers', name='Ridership'))
+        fig.add_vrect(x0=2020, x1=2021, fillcolor="red", opacity=0.2, layer="below", line_width=0, annotation_text="COVID-19 Impact", annotation_position="top left")
+        fig.update_layout(title='Ridership Trend with COVID-19 Impact (2013–2022)', xaxis_title='Year', yaxis_title='Ridership (Lakhs/day)', xaxis=dict(tickmode='linear'))
+        st.plotly_chart(fig)
+        ridership_df['Rolling_Avg'] = ridership_df['Ridership (Lakhs/day)'].rolling(window=3, center=True).mean()
+        plt.figure(figsize=(10,6))
+        plt.plot(ridership_df['Year'], ridership_df['Ridership (Lakhs/day)'], marker='o', label='Actual Ridership')
+        plt.plot(ridership_df['Year'], ridership_df['Rolling_Avg'], marker='x', linestyle='--', color='orange', label='3-Year Rolling Average')
+        plt.title('Ridership Trend with Rolling Average', fontsize=14)
+        plt.xlabel('Year', fontsize=12)
+        plt.ylabel('Ridership (Lakhs/day)', fontsize=12)
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        st.pyplot(plt)
+        ridership_df['YoY_Change'] = ridership_df['Ridership (Lakhs/day)'].pct_change() * 100
+        plt.figure(figsize
