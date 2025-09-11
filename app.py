@@ -1,5 +1,5 @@
 # 📌 Install required packages (only in Colab)
-!pip install geopandas folium
+pip install geopandas folium
 
 # 📌 Import libraries
 import pandas as pd
@@ -761,3 +761,4 @@ plt.plot(regression_df['Population'], y_pred, color='red', linewidth=2)
 plt.show()
 
  
+
