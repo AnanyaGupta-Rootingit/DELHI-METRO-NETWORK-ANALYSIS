@@ -44,7 +44,6 @@ if uploaded_file is not None:
             clean_value = re.sub(r'[^\d]', '', str(value))
             return int(clean_value) if clean_value else 0
 
-        # Corrected column name from 'Annual Ridersership' to 'Annual Ridership'
         ridership_long_df['Annual Ridership'] = ridership_long_df['Annual Ridership'].apply(clean_ridership)
 
         # Clean 'Route Length (km)'
@@ -77,6 +76,32 @@ if uploaded_file is not None:
 
         # Drop rows with missing Latitude, Longitude, or Population for wards
         wards_df_cleaned = wards_df.dropna(subset=['Latitude', 'Longitude', 'Population']).copy()
+
+        # --- Calculate Nearest Station and Distance (Moved here to be available for all sections) ---
+        if not wards_df_cleaned.empty and not stations_gdf_cleaned.empty:
+            def find_nearest_station(ward_coord, stations_df):
+                min_dist = float('inf')
+                nearest_station = None
+                for _, row in stations_df.iterrows():
+                    station_coord = (row['Latitude_network'], row['Longitude_network'])
+                    dist = geodesic(ward_coord, station_coord).km
+                    if dist < min_dist:
+                        min_dist = dist
+                        nearest_station = row['Station']
+                return nearest_station, min_dist
+
+            nearest_stations = []
+            distances = []
+            for idx, row in wards_df_cleaned.iterrows():
+                ward_coord = (row['Latitude'], row['Longitude'])
+                station_name, distance = find_nearest_station(ward_coord, stations_gdf_cleaned)
+                nearest_stations.append(station_name)
+                distances.append(distance)
+
+            wards_df_cleaned['Nearest Station'] = nearest_stations
+            wards_df_cleaned['Distance to Station (km)'] = distances
+        else:
+            st.warning("Ward population or station data is not available to calculate nearest station distances.")
 
 
         # --- Navigation Sidebar ---
@@ -260,31 +285,7 @@ if uploaded_file is not None:
             st.header("Population Coverage and Underserved Areas")
 
             # Ensure wards_df_cleaned is used for this section
-            if not wards_df_cleaned.empty and not stations_gdf_cleaned.empty:
-
-                # Assign nearest station to each ward
-                def find_nearest_station(ward_coord, stations_df):
-                    min_dist = float('inf')
-                    nearest_station = None
-                    for _, row in stations_df.iterrows():
-                        station_coord = (row['Latitude_network'], row['Longitude_network'])
-                        dist = geodesic(ward_coord, station_coord).km
-                        if dist < min_dist:
-                            min_dist = dist
-                            nearest_station = row['Station']
-                    return nearest_station, min_dist
-
-                # Apply to each ward
-                nearest_stations = []
-                distances = []
-                for idx, row in wards_df_cleaned.iterrows():
-                    ward_coord = (row['Latitude'], row['Longitude'])
-                    station_name, distance = find_nearest_station(ward_coord, stations_gdf_cleaned)
-                    nearest_stations.append(station_name)
-                    distances.append(distance)
-
-                wards_df_cleaned['Nearest Station'] = nearest_stations
-                wards_df_cleaned['Distance to Station (km)'] = distances
+            if not wards_df_cleaned.empty and not stations_gdf_cleaned.empty and 'Distance to Station (km)' in wards_df_cleaned.columns:
 
                 st.subheader("Population Served per Station (Estimated)")
                 population_per_station = wards_df_cleaned.groupby('Nearest Station')['Population'].sum().reset_index()
