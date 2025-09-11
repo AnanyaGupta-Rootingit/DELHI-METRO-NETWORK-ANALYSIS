@@ -44,7 +44,8 @@ if uploaded_file is not None:
             clean_value = re.sub(r'[^\d]', '', str(value))
             return int(clean_value) if clean_value else 0
 
-        ridership_long_df['Annual Ridership'] = ridership_long_df['Annual Ridersership'].apply(clean_ridership)
+        # Corrected column name from 'Annual Ridersership' to 'Annual Ridership'
+        ridership_long_df['Annual Ridership'] = ridership_long_df['Annual Ridership'].apply(clean_ridership)
 
         # Clean 'Route Length (km)'
         ridership_long_df['Route Length (km)'] = pd.to_numeric(ridership_long_df['Route Length (km)'], errors='coerce')
